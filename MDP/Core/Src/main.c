@@ -99,6 +99,7 @@ uint32_t speed = 0;
 
 uint8_t aRxBuffer[20];
 uint8_t circularBuffer[BUFFER_SIZE];
+uint8_t ack = 0xFF;
 volatile uint16_t writeIndex = 0;  // ISR writes to this index
 volatile uint16_t readIndex = 0;   // Task reads from this index
 
@@ -206,7 +207,7 @@ uint32_t PID_Compute(PIDController *pid, int32_t setpoint, int32_t measuredValue
 
 
 void UART_Transmit(char* message) {
-    HAL_UART_Transmit(&huart3, (uint8_t*)message, strlen(message), HAL_MAX_DELAY);
+    HAL_UART_Transmit_IT(&huart3, (uint8_t*)message, strlen(message), HAL_MAX_DELAY);
 }
 
 void SetDir(bool right, bool forward){
@@ -340,7 +341,9 @@ int main(void)
   MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
   OLED_Init();
-  HAL_UART_Receive_IT(&huart3, (uint8_t *)aRxBuffer, 10);
+  HAL_UART_Receive_IT(&huart3, (uint8_t *)aRxBuffer, 1);
+  __HAL_UART_ENABLE_IT(&huart3, UART_IT_RXNE);
+
 //  HAL_UART_Transmit_IT(&huart3, (uint8_t *)aRxBuffer, 10);
   // Start Encoders
   HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL); // Left encoder
@@ -356,6 +359,10 @@ int main(void)
   // Initialize the PID controllers for each motor
   PID_Init(&leftPID, 7, 0.01, 0.01, 0, 1500);  // Set your PID constants and output limits
   PID_Init(&rightPID, 4, 0.01, 0.01, 0, 1500); // Set your PID constants and output limits
+
+  SetDir(0,1);
+  SetDir(1,1);
+//  SetFacing(RIGHT);
   /* USER CODE END 2 */
 
   /* Create the mutex(es) */
@@ -748,6 +755,8 @@ static void MX_USART3_UART_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN USART3_Init 2 */
+//  HAL_NVIC_SetPriority(USART3_IRQn, 5, 0);
+//  HAL_NVIC_EnableIRQ(USART3_IRQn);
 
   /* USER CODE END USART3_Init 2 */
 
@@ -801,11 +810,69 @@ static void MX_GPIO_Init(void)
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
 	circularBuffer[writeIndex] = aRxBuffer[0];  // Assuming a single byte command for simplicity
-	    writeIndex = (writeIndex + 1) % BUFFER_SIZE;
+
+	writeIndex = (writeIndex + 1) % BUFFER_SIZE;
+
+	HAL_UART_Transmit_IT(&huart3, (uint8_t *)&ack, 1);
+	// Re-enable UART reception for the next byte
+	HAL_UART_Receive_IT(&huart3, (uint8_t *)aRxBuffer, 1);
+
+}
+
+typedef enum STATE {
+	WAIT,
+	STOP,
+	FORWARD,
+	BACKWARD,
+	TURN
+} STATE;
 
 
-	    // Re-enable UART reception for the next byte
-	    HAL_UART_Receive_IT(&huart3, aRxBuffer, 1);
+STATE UpdateState(uint8_t command, uint8_t degree) {
+  switch (command) {
+    case 0x00:
+    	SetSpeed(0,0);
+    	SetSpeed(1,0);
+      return STOP;
+      break;
+    case 0x01:
+      SetFacing(STRAIGHT);
+      osDelay(500);
+      SetDir(0,1);
+	    SetDir(1,1);
+      SetSpeed(0,1500);
+	    SetSpeed(1,1750);
+      return FORWARD;
+      break;
+    case 0x02:
+      SetFacing(STRAIGHT);
+      osDelay(500);
+      SetDir(0,0);
+	    SetDir(1,0);
+      SetSpeed(0,1500);
+	    SetSpeed(1,1750);
+      return BACKWARD;
+      break;
+    case 0x03:
+      if ((degree & 0x20) >> 5 == 0x01) SetFacing(RIGHT);
+      else SetFacing(LEFT);
+      osDelay(500);
+      if ((degree & 0x10) >> 4 == 0x01){
+        SetDir(0,1);
+	      SetDir(1,1);
+      }
+      else {
+        SetDir(0,0);
+	      SetDir(1,0);
+      }
+      SetSpeed(0,1500);
+	  SetSpeed(1,1650);
+      return TURN;
+      break;
+    default:
+      return WAIT;  // Default to WAIT if an unexpected value is received
+      break;
+  }
 }
 /* USER CODE END 4 */
 
@@ -826,7 +893,7 @@ void StartDefaultTask(void const * argument)
 	  UART_Transmit((uint8_t *)&ch);
 	  if(ch < 'Z') ch++;
 	  HAL_GPIO_TogglePin(GPIOE,LED_Pin);
-	  osDelay(500);
+	  osDelay(5000);
   }
   /* USER CODE END 5 */
 }
@@ -841,14 +908,14 @@ void StartDefaultTask(void const * argument)
 void StartTask02(void const * argument)
 {
   /* USER CODE BEGIN StartTask02 */
-	uint8_t hello[20] = "hello grp40 :) \0";
+	uint8_t hello[20];
   /* Infinite loop */
   for(;;)
   {
-//  sprintf(hello, "%s\0", aRxBuffer);
-	OLED_ShowString(10,5,hello);
-	OLED_Refresh_Gram();
-  osDelay(1000);
+//  sprintf(hello, "%02X", aRxBuffer);
+//  OLED_ShowString(10,5,hello);
+  OLED_Refresh_Gram();
+  osDelay(2000);
   }
   /* USER CODE END StartTask02 */
 }
@@ -973,118 +1040,74 @@ void StartStraight(void const * argument)
 * @retval None
 */
 /* USER CODE END Header_MotorTask */
-typedef enum STATE {
-	WAIT,
-	STOP,
-	FORWARD,
-	BACKWARD,
-	TURN
-} STATE;
-STATE CurrentState = WAIT;
-
-STATE UpdateState(uint8_t command, uint8_t degree) {
-  switch (command) {
-    case 0x00:
-      return STOP;
-      break;
-    case 0x01:
-      SetFacing(STRAIGHT);
-      SetDir(0,1);
-	    SetDir(1,1);
-      SetSpeed(0,1000);
-	    SetSpeed(1,1000);
-      return FORWARD;
-      break;
-    case 0x02:
-      SetFacing(STRAIGHT);
-      SetDir(0,0);
-	    SetDir(1,0);
-      SetSpeed(0,1000);
-	    SetSpeed(1,1000);
-      return BACKWARD;
-      break;
-    case 0x03:
-      if ((degree & 0x20) >> 5 == 0x01) SetFacing(RIGHT);
-      else SetFacing(LEFT);
-      if ((degree & 0x10) >> 4 == 0x01){
-        SetDir(0,1);
-	      SetDir(1,1);  
-      }
-      else {
-        SetDir(0,0);
-	      SetDir(1,0); 
-      }
-      SetSpeed(0,1000);
-	    SetSpeed(1,1000);
-      return TURN;
-      break;
-    default:
-      return WAIT;  // Default to WAIT if an unexpected value is received
-      break;
-  }
-}
-
-// 00 STOP, 01 FORWARD, 10 BACKWARDS, 11 TURN
-// STRAIGHT: rest 6 bits is distance
-// turn: 3rd bit right/left, 4th bit front/back, last 4 number of 90deg. 
 void MotorTask(void const * argument)
 {
   /* USER CODE BEGIN MotorTask */
   /* Infinite loop */
 	SetDir(0,1);
 	SetDir(1,1);
+	SetSpeed(0,0);
+	SetSpeed(1,0);
 
 	uint32_t currdist;
 	uint8_t degree;
-  uint8_t command;
-  uint32_t dist;
+	uint8_t command;
+	uint32_t dist;
+	uint8_t showBuf;
+	uint8_t buf;
+	STATE CurrentState = WAIT;
 	bool done;
 
 	EncoderReset(false, POSITION);
-	SetSpeed(0,0);
-	SetSpeed(1,0);
+	SetFacing(LEFT);
+	osDelay(500);
+	SetFacing(RIGHT);
+	osDelay(500);
+	SetFacing(STRAIGHT);
+	osDelay(500);
+
   for(;;)
   {
 	  
     switch (CurrentState)
     {
     case WAIT:
-      if (readIndex != writeIndex) {
-		    uint8_t buf = circularBuffer[readIndex];
-	      readIndex = (readIndex + 1) % BUFFER_SIZE;
-        command = (buf & 0xC0) >> 6;
-        degree = buf & 0x3F;
-        EncoderReset(false, POSITION);
-        CurrentState = UpdateState(command,degree);
+    	SetFacing(STRAIGHT);
+    	osDelay(500);
+    	if (readIndex != writeIndex) {
+    		buf = circularBuffer[readIndex];
+    		readIndex = (readIndex + 1) % BUFFER_SIZE;
+    		command = (buf & 0xC0) >> 6;
+    		degree = buf & 0x3F;
+    		EncoderReset(false, POSITION);
+    		CurrentState = UpdateState(command,degree);
 	    }
       break;
     case STOP:
-      SetSpeed(0,0);
+    	SetSpeed(0,0);
 	    SetSpeed(1,0);
-      osDelay(100);
-      CurrentState = WAIT;
+	    CurrentState = WAIT;
       break;
     case FORWARD:
-      dist = (degree - 52.5) / 3.5 * 200 + 2800;
-      osMutexWait(EncoderLeftMutexHandle, osWaitForever);
-      currdist = encoderLeft.position;
-      osMutexRelease(EncoderLeftMutexHandle);
-      if (currdist >  dist ){
-        SetSpeed(0,0);
-        SetSpeed(1,0);
-        osDelay(100);
-        CurrentState = WAIT;
-      }
+    	dist = (degree) / 5 * 300;
+    	osMutexWait(EncoderLeftMutexHandle, osWaitForever);
+    	currdist = encoderLeft.position;
+    	osMutexRelease(EncoderLeftMutexHandle);
+    	if (currdist >  dist ){
+    		SetSpeed(0,0);
+    		SetSpeed(1,0);
+    		CurrentState = WAIT;
+//    		UART_Transmit()
+    	}
       break;
     case BACKWARD:
-      dist = (degree - 52.5) / 3.5 * 200 + 2800;
+      dist = (degree) / 5 * 300;
       osMutexWait(EncoderLeftMutexHandle, osWaitForever);
       currdist = encoderLeft.position;
       osMutexRelease(EncoderLeftMutexHandle);
       if (currdist >  dist ){
         SetSpeed(0,0);
         SetSpeed(1,0);
-        osDelay(100);
         CurrentState = WAIT;
       }
       break;
@@ -1093,21 +1116,17 @@ void MotorTask(void const * argument)
       osMutexWait(EncoderLeftMutexHandle, osWaitForever);
       currdist = encoderLeft.position;
       osMutexRelease(EncoderLeftMutexHandle);
-      if ((degree & 0x10) >> 4 == 0x01){
-        if (currdist >  5100 * dist ){
+      if ((degree & 0x20) >> 5 == 0x01){
+        if (currdist >  4270 * dist ){
 		      SetSpeed(0,0);
 		      SetSpeed(1,0);
-          osDelay(100);
-		      SetFacing(STRAIGHT);
           CurrentState = WAIT;
 	      }
       }
       else{
-        if (currdist >  3600 * dist ){
+        if (currdist >  1700 * dist ){
 		      SetSpeed(0,0);
 		      SetSpeed(1,0);
-          osDelay(100);
-		      SetFacing(STRAIGHT);
           CurrentState = WAIT;
 	      }
       }
@@ -1118,7 +1137,7 @@ void MotorTask(void const * argument)
 //	  osMutexWait(EncoderLeftMutexHandle, osWaitForever);
 //	  currdist = encoderLeft.position;
 //	  osMutexRelease(EncoderLeftMutexHandle);
-//	  uint32_t dist = (115 - 80) / 3.5 * 200 + 4325;
+//	  uint32_t dist = (115 - 80) / 3.5 * 200 + 4150;
 //	  if (currdist >  dist ){
 //		  SetSpeed(0,0);
 //		  SetSpeed(1,0);
@@ -1128,27 +1147,27 @@ void MotorTask(void const * argument)
 //	  osMutexWait(EncoderLeftMutexHandle, osWaitForever);
 //	  currdist = encoderLeft.position;
 //	  osMutexRelease(EncoderLeftMutexHandle);
-//	  if (currdist >  1500 ){
+//	  if (currdist >  300 ){
 //		  SetSpeed(0,0);
 //		  SetSpeed(1,0);
 //	  }
 
-	  //right
-	  // osMutexWait(EncoderLeftMutexHandle, osWaitForever);
-	  // currdist = encoderLeft.position;
-	  // osMutexRelease(EncoderLeftMutexHandle);
-	  // if (currdist >  3600 ){
-		//   SetSpeed(0,0);
-		//   SetSpeed(1,0);
-		//   SetFacing(STRAIGHT);
-	  // }
-	  // if (currdist >  5100 ){
-		//   SetSpeed(0,0);
-		//   SetSpeed(1,0);
-		//   SetFacing(STRAIGHT);
-	  // }
+	  //left
+//	   osMutexWait(EncoderLeftMutexHandle, osWaitForever);
+//	   currdist = encoderLeft.position;
+//	   osMutexRelease(EncoderLeftMutexHandle);
+//	   if (currdist >  1800 ){
+//		   SetSpeed(0,0);
+//		   SetSpeed(1,0);
+//		   SetFacing(STRAIGHT);
+//	   }
+//	   if (currdist >  4250 ){
+//		   SetSpeed(0,0);
+//		   SetSpeed(1,0);
+//		   SetFacing(STRAIGHT);
+//	   }
 
-    osDelay(50);
+    osDelay(10);
   }
   /* USER CODE END MotorTask */
 }
