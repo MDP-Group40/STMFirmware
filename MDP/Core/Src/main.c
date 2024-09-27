@@ -207,7 +207,7 @@ uint32_t PID_Compute(PIDController *pid, int32_t setpoint, int32_t measuredValue
 
 
 void UART_Transmit(char* message) {
-    HAL_UART_Transmit_IT(&huart3, (uint8_t*)message, strlen(message), HAL_MAX_DELAY);
+    HAL_UART_Transmit_IT(&huart3, (uint8_t*)message, strlen(message));
 }
 
 void SetDir(bool right, bool forward){
@@ -813,7 +813,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
 
 	writeIndex = (writeIndex + 1) % BUFFER_SIZE;
 
-	HAL_UART_Transmit_IT(&huart3, (uint8_t *)&ack, 1);
+	HAL_UART_Transmit(&huart3, (uint8_t *)&ack, 1, HAL_MAX_DELAY);
 	// Re-enable UART reception for the next byte
 	HAL_UART_Receive_IT(&huart3, (uint8_t *)aRxBuffer, 1);
 
@@ -890,8 +890,8 @@ void StartDefaultTask(void const * argument)
 	uint8_t ch = 'A';
   for(;;)
   {
-	  UART_Transmit((uint8_t *)&ch);
-	  if(ch < 'Z') ch++;
+//	  UART_Transmit((uint8_t *)&ch);
+//	  if(ch < 'Z') ch++;
 	  HAL_GPIO_TogglePin(GPIOE,LED_Pin);
 	  osDelay(5000);
   }
@@ -1087,6 +1087,7 @@ void MotorTask(void const * argument)
     	SetSpeed(0,0);
 	    SetSpeed(1,0);
 	    CurrentState = WAIT;
+	    UART_Transmit(&buf);
       break;
     case FORWARD:
     	dist = (degree) / 5 * 300;
@@ -1097,7 +1098,7 @@ void MotorTask(void const * argument)
     		SetSpeed(0,0);
     		SetSpeed(1,0);
     		CurrentState = WAIT;
-//    		UART_Transmit()
+    		HAL_UART_Transmit(&huart3, (uint8_t *)&ack, 1, HAL_MAX_DELAY);
     	}
       break;
     case BACKWARD:
@@ -1109,6 +1110,7 @@ void MotorTask(void const * argument)
         SetSpeed(0,0);
         SetSpeed(1,0);
         CurrentState = WAIT;
+        HAL_UART_Transmit(&huart3, (uint8_t *)&ack, 1, HAL_MAX_DELAY);
       }
       break;
     case TURN:
@@ -1121,6 +1123,7 @@ void MotorTask(void const * argument)
 		      SetSpeed(0,0);
 		      SetSpeed(1,0);
           CurrentState = WAIT;
+          HAL_UART_Transmit(&huart3, (uint8_t *)&ack, 1, HAL_MAX_DELAY);
 	      }
       }
       else{
@@ -1128,6 +1131,7 @@ void MotorTask(void const * argument)
 		      SetSpeed(0,0);
 		      SetSpeed(1,0);
           CurrentState = WAIT;
+          HAL_UART_Transmit(&huart3, (uint8_t *)&ack, 1, HAL_MAX_DELAY);
 	      }
       }
       break;

@@ -15,9 +15,9 @@
 ../Core/Src/main.c:770:13:MX_GPIO_Init	1
 ../Core/Src/main.c:811:6:HAL_UART_RxCpltCallback	1
 ../Core/Src/main.c:831:7:UpdateState	7
-../Core/Src/main.c:886:6:StartDefaultTask	2
+../Core/Src/main.c:886:6:StartDefaultTask	1
 ../Core/Src/main.c:908:6:StartTask02	1
 ../Core/Src/main.c:930:6:EncoderTask	3
 ../Core/Src/main.c:978:6:StartStraight	2
 ../Core/Src/main.c:1043:6:MotorTask	12
-../Core/Src/main.c:1184:6:Error_Handler	1
+../Core/Src/main.c:1183:6:Error_Handler	1
