@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "oled.h"
+#include "ICM20948.h"
 #include <stdbool.h>
 
 /* USER CODE END Includes */
@@ -58,6 +59,11 @@ typedef enum DIRECTION {
 	LEFT
 }DIRECTION;
 
+typedef struct {
+	float pitch_CF;
+	float roll_CF;
+} IMURead;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -71,6 +77,8 @@ typedef enum DIRECTION {
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+I2C_HandleTypeDef hi2c1;
+
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
@@ -83,14 +91,17 @@ osThreadId showHandle;
 osThreadId EncoderHandle;
 osThreadId MoveStraightHandle;
 osThreadId motorTaskHandle;
-osMessageQId cmdQueueHandle;
+osThreadId icmTaskHandle;
 osMutexId EncoderLeftMutexHandle;
 osStaticMutexDef_t EncoderLeftMutexControlBlock;
 osMutexId EncoderRightMutexHandle;
 osStaticMutexDef_t EncoderRightMutexControlBlock;
+osMutexId IMUReadMutexHandle;
+osStaticMutexDef_t IMUReadMutexControlBlock;
 /* USER CODE BEGIN PV */
 volatile EncoderData encoderLeft = {0,0,0};
 volatile EncoderData encoderRight = {0,0,0};
+volatile IMURead imuRead = {0.0, 0.0};
 PIDController leftPID;
 PIDController rightPID;
 volatile uint32_t last_encoder_read_time = 0;
@@ -117,11 +128,13 @@ static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_USART3_UART_Init(void);
+static void MX_I2C1_Init(void);
 void StartDefaultTask(void const * argument);
 void StartTask02(void const * argument);
 void EncoderTask(void const * argument);
 void StartStraight(void const * argument);
 void MotorTask(void const * argument);
+void ICMUpdate(void const * argument);
 
 /* USER CODE BEGIN PFP */
 void SetForward(bool right);
@@ -129,7 +142,7 @@ void SetDir(bool right, bool forward);
 void SetSpeed(bool right, uint32_t pwmVal);
 void UART_Transmit(char* message);
 void PID_Init(PIDController *pid, float Kp, float Ki, float Kd, int32_t outputMin, int32_t outputMax);
-uint32_t PID_Compute(PIDController *pid, int32_t setpoint, int32_t measuredValue, int32_t deltaTime);
+uint32_t PID_Compute(PIDController *pid, int32_t setpoint, int32_t measuredValue, float deltaTime);
 void EncoderReset(bool right, EncoderDat EncoderData);
 void SetFacing(DIRECTION direction);
 
@@ -166,7 +179,7 @@ void PID_Init(PIDController *pid, float Kp, float Ki, float Kd, int32_t outputMi
  * @param  deltaTime: Time elapsed since the last update (in seconds).
  * @retval PID output value.
  */
-uint32_t PID_Compute(PIDController *pid, int32_t setpoint, int32_t measuredValue, int32_t deltaTime) {
+uint32_t PID_Compute(PIDController *pid, int32_t setpoint, int32_t measuredValue, float deltaTime) {
     // Calculate the error
     float error = setpoint - measuredValue;
 
@@ -290,13 +303,13 @@ void EncoderReset(bool right, EncoderDat EncoderData){
 void SetFacing(DIRECTION direction) {
 	switch(direction){
 	case STRAIGHT:
-		__HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4,150);
+		__HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4,SERVO_STRAIGHT);
 		break;
 	case RIGHT:
-		__HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4,200);
+		__HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4,SERVO_RIGHT);
 		break;
 	case LEFT:
-		__HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4,100);
+		__HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4,SERVO_LEFT);
 		break;
 	default:
 		__HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4,150);
@@ -339,10 +352,12 @@ int main(void)
   MX_TIM3_Init();
   MX_TIM1_Init();
   MX_USART3_UART_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
   OLED_Init();
   HAL_UART_Receive_IT(&huart3, (uint8_t *)aRxBuffer, 1);
   __HAL_UART_ENABLE_IT(&huart3, UART_IT_RXNE);
+  UART_Transmit("Hello");
 
 //  HAL_UART_Transmit_IT(&huart3, (uint8_t *)aRxBuffer, 10);
   // Start Encoders
@@ -357,8 +372,8 @@ int main(void)
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4); // Servo motor PWM
 //  SetServo(150);
   // Initialize the PID controllers for each motor
-  PID_Init(&leftPID, 7, 0.01, 0.01, 0, 1500);  // Set your PID constants and output limits
-  PID_Init(&rightPID, 4, 0.01, 0.01, 0, 1500); // Set your PID constants and output limits
+  PID_Init(&leftPID, 1, 0.95, 0.002, 0, 2000);  // Set your PID constants and output limits
+  PID_Init(&rightPID, 1, 0.01, 0.01, 0, 1500); // Set your PID constants and output limits
 
   SetDir(0,1);
   SetDir(1,1);
@@ -374,6 +389,10 @@ int main(void)
   osMutexStaticDef(EncoderRightMutex, &EncoderRightMutexControlBlock);
   EncoderRightMutexHandle = osMutexCreate(osMutex(EncoderRightMutex));
 
+  /* definition and creation of IMUReadMutex */
+  osMutexStaticDef(IMUReadMutex, &IMUReadMutexControlBlock);
+  IMUReadMutexHandle = osMutexCreate(osMutex(IMUReadMutex));
+
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
   /* USER CODE END RTOS_MUTEX */
@@ -385,11 +404,6 @@ int main(void)
   /* USER CODE BEGIN RTOS_TIMERS */
   /* start timers, add new ones, ... */
   /* USER CODE END RTOS_TIMERS */
-
-  /* Create the queue(s) */
-  /* definition and creation of cmdQueue */
-  osMessageQDef(cmdQueue, 16, uint8_t);
-  cmdQueueHandle = osMessageCreate(osMessageQ(cmdQueue), NULL);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
@@ -407,14 +421,18 @@ int main(void)
   /* definition and creation of Encoder */
   osThreadDef(Encoder, EncoderTask, osPriorityIdle, 0, 128);
   EncoderHandle = osThreadCreate(osThread(Encoder), NULL);
-
-  /* definition and creation of MoveStraight */
-//  osThreadDef(MoveStraight, StartStraight, osPriorityIdle, 0, 128);
+//
+//  /* definition and creation of MoveStraight */
+//  osThreadDef(MoveStraight, StartStraight, osPriorityHigh, 0, 512);
 //  MoveStraightHandle = osThreadCreate(osThread(MoveStraight), NULL);
-
-  /* definition and creation of motorTask */
+//
+//  /* definition and creation of motorTask */
   osThreadDef(motorTask, MotorTask, osPriorityIdle, 0, 128);
   motorTaskHandle = osThreadCreate(osThread(motorTask), NULL);
+
+  /* definition and creation of icmTask */
+//   osThreadDef(icmTask, ICMUpdate, osPriorityNormal, 0, 1024);
+//   icmTaskHandle = osThreadCreate(osThread(icmTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
@@ -475,6 +493,40 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.ClockSpeed = 100000;
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
 }
 
 /**
@@ -813,7 +865,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
 
 	writeIndex = (writeIndex + 1) % BUFFER_SIZE;
 
-	HAL_UART_Transmit(&huart3, (uint8_t *)&ack, 1, HAL_MAX_DELAY);
+//	HAL_UART_Transmit(&huart3, (uint8_t *)&ack, 1, HAL_MAX_DELAY);
 	// Re-enable UART reception for the next byte
 	HAL_UART_Receive_IT(&huart3, (uint8_t *)aRxBuffer, 1);
 
@@ -824,7 +876,11 @@ typedef enum STATE {
 	STOP,
 	FORWARD,
 	BACKWARD,
-	TURN
+	TURN,
+	FWLEFT,
+	BWLEFT,
+	FWRIGHT,
+	BWRIGHT
 } STATE;
 
 
@@ -840,8 +896,8 @@ STATE UpdateState(uint8_t command, uint8_t degree) {
       osDelay(500);
       SetDir(0,1);
 	    SetDir(1,1);
-      SetSpeed(0,1500);
-	    SetSpeed(1,1750);
+      SetSpeed(0,1200);
+	    SetSpeed(1,1450);
       return FORWARD;
       break;
     case 0x02:
@@ -849,8 +905,8 @@ STATE UpdateState(uint8_t command, uint8_t degree) {
       osDelay(500);
       SetDir(0,0);
 	    SetDir(1,0);
-      SetSpeed(0,1500);
-	    SetSpeed(1,1750);
+      SetSpeed(0,1000);
+	    SetSpeed(1,1200);
       return BACKWARD;
       break;
     case 0x03:
@@ -865,8 +921,8 @@ STATE UpdateState(uint8_t command, uint8_t degree) {
         SetDir(0,0);
 	      SetDir(1,0);
       }
-      SetSpeed(0,1500);
-	  SetSpeed(1,1650);
+      SetSpeed(0,1300);
+	  SetSpeed(1,1400);
       return TURN;
       break;
     default:
@@ -893,7 +949,7 @@ void StartDefaultTask(void const * argument)
 //	  UART_Transmit((uint8_t *)&ch);
 //	  if(ch < 'Z') ch++;
 	  HAL_GPIO_TogglePin(GPIOE,LED_Pin);
-	  osDelay(5000);
+	  osDelay(1000);
   }
   /* USER CODE END 5 */
 }
@@ -908,14 +964,14 @@ void StartDefaultTask(void const * argument)
 void StartTask02(void const * argument)
 {
   /* USER CODE BEGIN StartTask02 */
-	uint8_t hello[20];
+	uint8_t hello[20] = "hello";
   /* Infinite loop */
   for(;;)
   {
 //  sprintf(hello, "%02X", aRxBuffer);
-//  OLED_ShowString(10,5,hello);
+ OLED_ShowString(10,5,hello);
   OLED_Refresh_Gram();
-  osDelay(2000);
+  osDelay(50);
   }
   /* USER CODE END StartTask02 */
 }
@@ -946,16 +1002,16 @@ void EncoderTask(void const * argument)
 	      if (elapsed_time >= T) {  // Every 20ms (T = 0.02s)
 	          // Calculate the speed in ticks per second
 	          uint16_t delta_ticks = (uint16_t)(counter_current);
-	          speed = (uint32_t)(delta_ticks) * 1000 / elapsed_time; // Speed in ticks per second
+	          speed = (uint32_t)(delta_ticks * 1000 / elapsed_time); // Speed in ticks per second
             osMutexWait(EncoderLeftMutexHandle, osWaitForever);
             encoderLeft.speed = speed;
             encoderLeft.position += counter_current;
             position = encoderLeft.position;
             osMutexRelease(EncoderLeftMutexHandle);
         
-            sprintf(speedStr, "%.7d", position);
+            sprintf(speedStr, "%.7d", speed);
             OLED_ShowString(10,30,speedStr);
-	          // OLED_Refresh_Gram();
+//	           OLED_Refresh_Gram();
 	          // Save the current time and encoder count for the next calculation
 	          last_encoder_read_time = current_time;
 	          // counter_prev = counter_current;
@@ -981,10 +1037,13 @@ void StartStraight(void const * argument)
 
 	// Desired setpoint (target speed)
 	uint8_t hello[20];
-	uint16_t targetSpeed = 900.0; // Example target speed in counts per second
+	uint16_t targetSpeed = 600.0; // Example target speed in counts per second
 
 	// Time between PID updates
-	uint32_t deltaTime = 0.02; // 10 ms
+	TickType_t deltaTime;  // Time difference between ticks
+	const TickType_t T_in_ticks = pdMS_TO_TICKS(T);  // Convert time threshold `T` from ms to ticks
+
+//	uint32_t deltaTime = 0.02; // 10 ms
 	SetDir(0,1);
 
 	// Initial PWM values
@@ -992,8 +1051,8 @@ void StartStraight(void const * argument)
 	uint32_t rightMotorPWM = 0;
 	uint32_t leftSpeed = 0;
 	uint32_t rightSpeed = 0;
-	uint32_t lastTick;
-	uint32_t currentTick;
+	TickType_t lastTick;
+	TickType_t currentTick;
 
 	// Initial encoder positions
 	osMutexWait(EncoderLeftMutexHandle, osWaitForever);
@@ -1006,20 +1065,20 @@ void StartStraight(void const * argument)
 	SetSpeed(0,leftMotorPWM);
 	SetSpeed(0,leftMotorPWM);
 
-  lastTick = HAL_GetTick();
+	lastTick = xTaskGetTickCount();
 
   /* Infinite loop */
   	  for(;;)
   	  {
-	  currentTick = HAL_GetTick();
+	  currentTick = xTaskGetTickCount();
 	  deltaTime = (currentTick - lastTick); // Convert ms to seconds
-	  if(deltaTime >= T){
+	  if(deltaTime >= T_in_ticks){
       osMutexWait(EncoderLeftMutexHandle, osWaitForever);
       leftSpeed = encoderLeft.speed;
       osMutexRelease(EncoderLeftMutexHandle);
       
       // Compute the PID output for each motor
-      leftMotorPWM = (uint32_t)PID_Compute(&leftPID, targetSpeed, leftSpeed, deltaTime);
+      leftMotorPWM = (uint32_t)PID_Compute(&leftPID, targetSpeed, leftSpeed, T / 1000.0f);
 
       // Set the PWM duty cycle for each motor
       SetSpeed(0,leftMotorPWM);
@@ -1065,6 +1124,8 @@ void MotorTask(void const * argument)
 	osDelay(500);
 	SetFacing(STRAIGHT);
 	osDelay(500);
+//  SetSpeed(1, 2000);
+//  SetSpeed(0, 2000);
 
   for(;;)
   {
@@ -1090,7 +1151,7 @@ void MotorTask(void const * argument)
 	    UART_Transmit(&buf);
       break;
     case FORWARD:
-    	dist = (degree) / 5 * 300;
+    	dist = (uint32_t)((float)(degree) / 5 * 240);
     	osMutexWait(EncoderLeftMutexHandle, osWaitForever);
     	currdist = encoderLeft.position;
     	osMutexRelease(EncoderLeftMutexHandle);
@@ -1102,7 +1163,7 @@ void MotorTask(void const * argument)
     	}
       break;
     case BACKWARD:
-      dist = (degree) / 5 * 300;
+      dist = (uint32_t)((float)(degree) / 5 * 240);
       osMutexWait(EncoderLeftMutexHandle, osWaitForever);
       currdist = encoderLeft.position;
       osMutexRelease(EncoderLeftMutexHandle);
@@ -1119,7 +1180,7 @@ void MotorTask(void const * argument)
       currdist = encoderLeft.position;
       osMutexRelease(EncoderLeftMutexHandle);
       if ((degree & 0x20) >> 5 == 0x01){
-        if (currdist >  4270 * dist ){
+        if (currdist >  RIGHT_TURN * dist ){
 		      SetSpeed(0,0);
 		      SetSpeed(1,0);
           CurrentState = WAIT;
@@ -1127,11 +1188,21 @@ void MotorTask(void const * argument)
 	      }
       }
       else{
-        if (currdist >  1700 * dist ){
+        if (currdist >  LEFT_TURN * dist ){
 		      SetSpeed(0,0);
 		      SetSpeed(1,0);
-          CurrentState = WAIT;
-          HAL_UART_Transmit(&huart3, (uint8_t *)&ack, 1, HAL_MAX_DELAY);
+
+          if ((degree & 0x10) >> 4 == 0x01){
+            command = 0x01;
+          }
+          else {
+            command = 0x02;
+          }
+          degree = 0x0A;
+          EncoderReset(false, POSITION);
+          CurrentState = UpdateState(command,degree);
+          // CurrentState = WAIT;
+          // HAL_UART_Transmit(&huart3, (uint8_t *)&ack, 1, HAL_MAX_DELAY);
 	      }
       }
       break;
@@ -1174,6 +1245,91 @@ void MotorTask(void const * argument)
     osDelay(10);
   }
   /* USER CODE END MotorTask */
+}
+
+/* USER CODE BEGIN Header_ICMUpdate */
+/**
+* @brief Function implementing the icmTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_ICMUpdate */
+void ICMUpdate(void const * argument)
+{
+  /* USER CODE BEGIN ICMUpdate */
+  /* Infinite loop */
+	ICM20948 imu;
+	uint8_t* status = IMU_Initialise( &imu, &hi2c1, &huart3);
+
+	int i;
+	float ax,ay, az, gx,gy,gz;
+	float pitch, roll, pitch_gyro = 0, roll_gyro = 0, pitch_CF = 0, roll_CF = 0;
+
+	uint32_t millisOld = HAL_GetTick();
+	uint32_t millisNow, dt;
+  for(;;)
+  {
+	  uint8_t sbuf[10][10] = {0};
+
+	  	  IMU_AccelRead(&imu);
+	  	  IMU_GyroRead(&imu);
+
+	  	  millisNow = HAL_GetTick();
+	  	  dt = millisNow - millisOld;
+	  	  millisOld = millisNow;
+
+	  	  ax = imu.acc[0];
+	  	  ay = imu.acc[1];
+	  	  az = imu.acc[2];
+	  	  roll = atan(ay/az) / M_PI * 180;
+	  	  pitch = atan(ax/az) / M_PI * 180;
+	  	  pitch = -pitch;
+
+	  	  gx = imu.gyro[0];
+	  	  gy = imu.gyro[1];
+	  	  gz = imu.gyro[2];
+
+	  	  roll_gyro = roll_gyro + (imu.gyro[0]*dt*0.001);
+	  	  pitch_gyro = pitch_gyro + (imu.gyro[1]*dt*0.001);
+
+	  	  roll_CF = 0.05*roll +0.95*(roll_CF + imu.gyro[0]*dt*0.001);
+	  	  pitch_CF = 0.05*pitch + 0.95*(pitch_CF + imu.gyro[1]*dt*0.001);
+
+	  	  osMutexWait(IMUReadMutexHandle, osWaitForever);
+	  	  imuRead.pitch_CF = pitch_CF;
+	  	  imuRead.roll_CF = roll_CF;
+	  	  osMutexRelease(IMUReadMutexHandle);
+
+	  	snprintf(sbuf[0], sizeof(sbuf[0]), "%5.2f , ", roll);
+	  	snprintf(sbuf[1], sizeof(sbuf[1]), "%5.2f , ", pitch);
+
+
+	  	snprintf(sbuf[2], sizeof(sbuf[2]), "%7.2f , ", roll_gyro);
+	  	snprintf(sbuf[3], sizeof(sbuf[3]), "%7.2f , ", pitch_gyro);
+
+	  	snprintf(sbuf[4], sizeof(sbuf[4]), "%7.2f , ", roll_CF);
+	  	snprintf(sbuf[5], sizeof(sbuf[5]), "%7.2f , ", pitch_CF);
+        // OLED_ShowString(10,20, (uint8_t *)&(sbuf[4]));
+
+//	  	  HAL_UART_Transmit(&huart3, sbuf[0], 8, HAL_MAX_DELAY);
+//	  	  HAL_UART_Transmit(&huart3, sbuf[1], 8, HAL_MAX_DELAY);
+//	  	  HAL_UART_Transmit(&huart3, sbuf[2], 10, HAL_MAX_DELAY);
+//	  	  HAL_UART_Transmit(&huart3, sbuf[3], 10, HAL_MAX_DELAY);
+//	  	  HAL_UART_Transmit(&huart3, sbuf[4], 10, HAL_MAX_DELAY);
+//	  	  HAL_UART_Transmit(&huart3, sbuf[5], 10, HAL_MAX_DELAY);
+//
+//	  	  HAL_UART_Transmit(&huart3, "\r\n", 10, HAL_MAX_DELAY);
+	  	char txBuffer[64];  // Large enough to hold all formatted data
+	  	snprintf(txBuffer, sizeof(txBuffer),
+	  	         "%5.2f , %5.2f , %7.2f , %7.2f , %7.2f , %7.2f\r\n",
+	  	         roll, pitch, roll_gyro, pitch_gyro, roll_CF, pitch_CF);
+
+	  	// Transmit the entire buffer in one call
+	  	HAL_UART_Transmit(&huart3, (uint8_t*)txBuffer, strlen(txBuffer), HAL_MAX_DELAY);
+
+    osDelay(10);
+  }
+  /* USER CODE END ICMUpdate */
 }
 
 /**

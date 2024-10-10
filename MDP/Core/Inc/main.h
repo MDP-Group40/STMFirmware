@@ -31,7 +31,7 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
@@ -46,6 +46,11 @@ extern "C" {
 
 /* Exported macro ------------------------------------------------------------*/
 /* USER CODE BEGIN EM */
+#define SERVO_STRAIGHT 	150
+#define SERVO_LEFT 		100
+#define SERVO_RIGHT 	205
+#define RIGHT_TURN		3850
+#define LEFT_TURN 		1570
 
 /* USER CODE END EM */
 
