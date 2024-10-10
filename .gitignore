@@ -3,4 +3,5 @@
 *.cproject
 *.project
 *.launch
-Debug/
+*Debug/
+*.mxproject
