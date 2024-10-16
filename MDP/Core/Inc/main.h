@@ -48,9 +48,11 @@ extern "C" {
 /* USER CODE BEGIN EM */
 #define SERVO_STRAIGHT 	150
 #define SERVO_LEFT 		100
-#define SERVO_RIGHT 	205
-#define RIGHT_TURN		3850
-#define LEFT_TURN 		1570
+#define SERVO_RIGHT 	215
+#define RIGHT_TURN		3470
+#define LEFT_TURN 		1700
+#define TARGET_LEFT   1000
+#define TARGET_RIGHT  1200
 
 /* USER CODE END EM */
 
@@ -82,8 +84,16 @@ void Error_Handler(void);
 #define DC_GPIO_Port GPIOE
 #define LED_Pin GPIO_PIN_10
 #define LED_GPIO_Port GPIOE
+#define IR_LEFT_Pin GPIO_PIN_12
+#define IR_LEFT_GPIO_Port GPIOE
+#define IR_RIGHT_Pin GPIO_PIN_13
+#define IR_RIGHT_GPIO_Port GPIOE
 #define PWM_SERVO_Pin GPIO_PIN_14
 #define PWM_SERVO_GPIO_Port GPIOE
+#define ULTRA_ECHO_Pin GPIO_PIN_12
+#define ULTRA_ECHO_GPIO_Port GPIOD
+#define ULTRA_TRIG_Pin GPIO_PIN_13
+#define ULTRA_TRIG_GPIO_Port GPIOD
 #define PWMLEFT_Pin GPIO_PIN_6
 #define PWMLEFT_GPIO_Port GPIOC
 #define PWMRIGHT_Pin GPIO_PIN_7
