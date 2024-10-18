@@ -23,7 +23,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "oled.h"
-#include "ICM20948.h"
+// #include "ICM20948.h"
+#include "icm20948.h"
 #include <stdbool.h>
 
 /* USER CODE END Includes */
@@ -62,14 +63,16 @@ typedef enum _DIRECTION_t {
 }DIRECTION;
 
 typedef struct _IMURead_t{
-	float pitch_CF;
-	float roll_CF;
+  axises my_gyro;
+  axises my_accel;
+  axises my_mag;
+  float current_heading;
 } IMURead_t;
 
 //in mm
 typedef struct _IRRead_t{
-	float left;
-	float right;
+	double left;
+	double right;
 }IRRead_t;
 
 typedef struct _UltraRead_t{
@@ -89,7 +92,8 @@ typedef enum STATE {
 	FWLEFT,
 	BWLEFT,
 	FWRIGHT,
-	BWRIGHT
+	BWRIGHT,
+	CALI
 } STATE;
 
 typedef enum MOVE_STATE_t {
@@ -104,11 +108,19 @@ typedef enum _CMD_STATE_T{
 	FIN
 } CMD_STATE_T;
 
+typedef enum {
+    INIT_PID_MOVEMENT,
+    PROGRESS_PID_MOVEMENT,
+    DONE_PID_MOVEMENT
+} PID_MOVE_STATE;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 #define BUFFER_SIZE 64
+#define NUM_SAMPLES 5
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -128,6 +140,7 @@ TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
+TIM_HandleTypeDef htim6;
 TIM_HandleTypeDef htim8;
 
 UART_HandleTypeDef huart3;
@@ -153,11 +166,22 @@ osStaticMutexDef_t UltrasonicMutexControlBlock;
 /* USER CODE BEGIN PV */
 volatile EncoderData encoderLeft = {0,0,0};
 volatile EncoderData encoderRight = {0,0,0};
-volatile IMURead_t imuRead = {0.0, 0.0};
+//volatile IMURead_t imuRead = {0.0, 0.0};
+
+
+volatile double CurrentHeading = 0.0f;
+volatile double MagReading = 0.0f;
+float gyro_samples[NUM_SAMPLES];  // Buffer to hold recent gyro readings
+int sample_index = 0;
+
+// Timer variables for precise time intervals using TIM6
+uint32_t last_timestamp = 0;  // To store the last time a sample was taken
+
+
 volatile IRRead_t IRRead = {0,0};
 volatile UltraRead_t UltraRead = {0};
-volatile uint32_t LEFT_IR_RES_BUFFER[1];
-volatile uint32_t RIGHT_IR_RES_BUFFER[1];
+volatile uint32_t LEFT_IR_RES_BUFFER[2];
+volatile uint32_t RIGHT_IR_RES_BUFFER[2];
 
 PIDController leftPID;
 PIDController rightPID;
@@ -180,6 +204,8 @@ uint32_t Difference = 0;
 uint8_t Is_First_Captured = 0;  // is the first value captured ?
 uint16_t Distance  = 0;
 
+PID_MOVE_STATE pid_move_state = INIT_PID_MOVEMENT;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -195,6 +221,7 @@ static void MX_I2C1_Init(void);
 static void MX_ADC1_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_ADC2_Init(void);
+static void MX_TIM6_Init(void);
 void StartDefaultTask(void const * argument);
 void StartTask02(void const * argument);
 void EncoderTask(void const * argument);
@@ -205,6 +232,9 @@ void IRTask(void const * argument);
 void UltrasonicTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
+void vApplicationStackOverflowHook( TaskHandle_t xTask,
+                                    char *pcTaskName );
+void vApplicationMallocFailedHook(void);
 void SetForward(bool right);
 void SetDir(bool right, bool forward);
 void SetSpeed(bool right, uint32_t pwmVal);
@@ -220,6 +250,60 @@ CMD_STATE_T Move_Turn(bool forward, DIRECTION direction, float degree);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+//CMD_STATE_T B1RightAdjustPID(bool forward, float setpointDistance, float currentDistance) {
+//    static uint32_t lastTime = 0;
+//    uint32_t currTime;
+//    float deltaTime;
+//    uint32_t pidOutput;
+//
+//    switch(pid_move_state) {
+//        case INIT_PID_MOVEMENT:
+//            // Reset necessary sensors and encoders for movement
+//            EncoderReset(false, POSITION);    // Reset encoder
+//            HeadingReset();                   // Reset IMU heading
+//            SetDir(1, forward);               // Set motor direction (forward/backward)
+//            SetDir(0, forward);
+//            SetSpeed(0, 1300);                // Set initial speed
+//            SetSpeed(1, 1300);
+//
+//            lastTime = HAL_GetTick();         // Initialize time tracking
+//            pid_move_state = PROGRESS_PID_MOVEMENT;
+//            break;
+//
+//        case PROGRESS_PID_MOVEMENT:
+//            // Calculate the time difference
+//            currTime = HAL_GetTick();
+//            deltaTime = (currTime - lastTime) / 1000.0f;  // Convert to seconds
+//            lastTime = currTime;
+//
+//            // Call PID Compute to get the speed adjustment based on distance
+//            pidOutput = PID_Compute(&distancePID, (int32_t)setpointDistance, (int32_t)currentDistance, deltaTime);
+//
+//            // Apply the PID output as motor speeds
+//            SetSpeed(0, pidOutput);    // Apply output to motor 0
+//            SetSpeed(1, pidOutput);    // Apply output to motor 1
+//
+//            // Check if the distance is within a certain tolerance
+//            if (fabs(currentDistance - setpointDistance) < 1.0f) {  // 1 cm tolerance
+//                SetSpeed(0, 0);  // Stop the motors
+//                SetSpeed(1, 0);
+//                pid_move_state = DONE_PID_MOVEMENT;
+//            }
+//            break;
+//
+//        case DONE_PID_MOVEMENT:
+//            pid_move_state = INIT_PID_MOVEMENT;  // Reset state machine
+//            return FIN;                          // Return finished
+//            break;
+//
+//        default:
+//            pid_move_state = INIT_PID_MOVEMENT;  // Reset state machine on error
+//            return ERR;
+//    }
+//    return PROG;  // Return progress state
+//}
+
 
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
@@ -271,6 +355,19 @@ void delay_us (uint16_t us)
 {
 	__HAL_TIM_SET_COUNTER(&htim1,0);  // set the counter value a 0
 	while (__HAL_TIM_GET_COUNTER(&htim1) < us);  // wait for the counter to reach the us input in the parameter
+}
+
+float get_time_difference(uint32_t current_time, uint32_t last_time)
+{
+    if (current_time >= last_time)
+    {
+        return (float)(current_time - last_time) / 1000000.0f;  // Convert from microseconds to seconds
+    }
+    else
+    {
+        // Handle counter overflow
+        return (float)((0xFFFF - last_time) + current_time + 1) / 1000000.0f;
+    }
 }
 
 /**
@@ -422,6 +519,12 @@ void EncoderReset(bool right, EncoderDat EncoderData){
 	}
 }
 
+void HeadingReset (){
+	osMutexWait(IMUReadMutexHandle, HAL_MAX_DELAY);
+  CurrentHeading = 0.0f;
+  osMutexRelease(IMUReadMutexHandle);
+}
+
 void SetFacing(DIRECTION direction) {
 	switch(direction){
 	case STRAIGHT:
@@ -434,10 +537,10 @@ void SetFacing(DIRECTION direction) {
 		__HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4,SERVO_LEFT);
 		break;
 	case HALF_RIGHT:
-		__HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4, 180);
+		__HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4, 185);
 		break;
 	case HALF_LEFT:
-		__HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4, 125);
+		__HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4, 120);
 		break;
 	default:
 		__HAL_TIM_SetCompare(&htim1, TIM_CHANNEL_4,150);
@@ -498,11 +601,14 @@ int main(void)
   MX_ADC1_Init();
   MX_TIM4_Init();
   MX_ADC2_Init();
+  MX_TIM6_Init();
   /* USER CODE BEGIN 2 */
   OLED_Init();
   HAL_UART_Receive_IT(&huart3, (uint8_t *)aRxBuffer, 1);
   __HAL_UART_ENABLE_IT(&huart3, UART_IT_RXNE);
   UART_Transmit("Hello");
+  icm20948_init();
+//  ak09916_init();
 
 //  HAL_UART_Transmit_IT(&huart3, (uint8_t *)aRxBuffer, 10);
   // Start Encoders
@@ -515,18 +621,16 @@ int main(void)
   HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_1); // Left motor PWM
   HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_2); // Right motor PWM
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4); // Servo motor PWM
-  HAL_ADC_Start_DMA(&hadc1, LEFT_IR_RES_BUFFER, 1);
-  HAL_ADC_Start_DMA(&hadc2, RIGHT_IR_RES_BUFFER, 1);
+  HAL_ADC_Start_DMA(&hadc1, LEFT_IR_RES_BUFFER, 2);
+  HAL_ADC_Start_DMA(&hadc2, RIGHT_IR_RES_BUFFER, 2);
   HAL_TIM_Base_Start(&htim4);
 
   HAL_TIM_IC_Start_IT(&htim4, TIM_CHANNEL_1);
-//  SetServo(150);
+
   // Initialize the PID controllers for each motor
   PID_Init(&leftPID, 1, 0.95, 0.002, 0, 2000);  // Set your PID constants and output limits
   PID_Init(&rightPID, 1, 0.01, 0.01, 0, 1500); // Set your PID constants and output limits
 
-  SetDir(0,1);
-  SetDir(1,1);
 //  SetFacing(RIGHT);
   /* USER CODE END 2 */
 
@@ -569,15 +673,15 @@ int main(void)
 
   /* Create the thread(s) */
   /* definition and creation of defaultTask */
-  osThreadDef(defaultTask, StartDefaultTask, osPriorityLow, 0, 128);
+  osThreadDef(defaultTask, StartDefaultTask, osPriorityIdle, 0, 128);
   defaultTaskHandle = osThreadCreate(osThread(defaultTask), NULL);
 
   /* definition and creation of show */
-  osThreadDef(show, StartTask02, osPriorityLow, 0, 128);
-  showHandle = osThreadCreate(osThread(show), NULL);
+//  osThreadDef(show, StartTask02, osPriorityIdle, 0, 128);
+//  showHandle = osThreadCreate(osThread(show), NULL);
 
   /* definition and creation of Encoder */
-  osThreadDef(Encoder, EncoderTask, osPriorityHigh, 0, 128);
+  osThreadDef(Encoder, EncoderTask, osPriorityHigh, 0, 256);
   EncoderHandle = osThreadCreate(osThread(Encoder), NULL);
 
   /* definition and creation of MoveStraight */
@@ -585,19 +689,19 @@ int main(void)
 //  MoveStraightHandle = osThreadCreate(osThread(MoveStraight), NULL);
 
   /* definition and creation of motorTask */
-  osThreadDef(motorTask, MotorTask, osPriorityHigh, 0, 2048);
+  osThreadDef(motorTask, MotorTask, osPriorityNormal, 0, 1024);
   motorTaskHandle = osThreadCreate(osThread(motorTask), NULL);
 
   /* definition and creation of icmTask */
-//  osThreadDef(icmTask, ICMUpdate, osPriorityNormal, 0, 1024);
-//  icmTaskHandle = osThreadCreate(osThread(icmTask), NULL);
+  osThreadDef(icmTask, ICMUpdate, osPriorityHigh, 0, 1024);
+  icmTaskHandle = osThreadCreate(osThread(icmTask), NULL);
 
   /* definition and creation of infraTask */
- osThreadDef(infraTask, IRTask, osPriorityIdle, 0, 1024);
- infraTaskHandle = osThreadCreate(osThread(infraTask), NULL);
+  osThreadDef(infraTask, IRTask, osPriorityRealtime, 0, 1024);
+  infraTaskHandle = osThreadCreate(osThread(infraTask), NULL);
 
   /* definition and creation of ultrasonicTask */
-  osThreadDef(ultrasonicTask, UltrasonicTask, osPriorityIdle, 0, 128);
+  osThreadDef(ultrasonicTask, UltrasonicTask, osPriorityNormal, 0, 128);
   ultrasonicTaskHandle = osThreadCreate(osThread(ultrasonicTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
@@ -1030,6 +1134,44 @@ static void MX_TIM4_Init(void)
 }
 
 /**
+  * @brief TIM6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM6_Init(void)
+{
+
+  /* USER CODE BEGIN TIM6_Init 0 */
+
+  /* USER CODE END TIM6_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM6_Init 1 */
+
+  /* USER CODE END TIM6_Init 1 */
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler = 15;
+  htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim6.Init.Period = 65535;
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM6_Init 2 */
+
+  /* USER CODE END TIM6_Init 2 */
+
+}
+
+/**
   * @brief TIM8 Initialization Function
   * @param None
   * @retval None
@@ -1235,6 +1377,20 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
 
 }
 
+void vApplicationStackOverflowHook( TaskHandle_t xTask,
+                                    char *pcTaskName ){
+	uint8_t hello[100];
+	for (int i = 0; i < 100; ++i){
+		hello[i] = 1+1;
+	}
+}
+void vApplicationMallocFailedHook( ){
+	uint8_t hello[100];
+		for (int i = 0; i < 100; ++i){
+			hello[i] = 1+1;
+		}
+}
+
 // Ramp state structure to hold the state between function calls
 typedef struct {
     uint16_t pwmLeft;
@@ -1308,7 +1464,8 @@ void InitializeRampState(MotorRampState* state, uint16_t targetLeftPWM, uint16_t
 }
 
 MotorRampState rampState;
-uint32_t Block2Far = 0;
+uint32_t vertDist = 0;
+uint32_t horiDist = 0;
 
 CMD_STATE_T GoToB1(){
   uint16_t frontDist;
@@ -1321,19 +1478,19 @@ CMD_STATE_T GoToB1(){
   // EncoderReset(0, POSITION);
   // Check if the ramping process is complete
   if (rampState.rampingComplete || frontDist < 40) {
-    if (frontDist < 30){
+    if (frontDist < 27){
       SetSpeed(1,0);
       SetSpeed(0,0);
       // osMutexWait(EncoderLeftMutexHandle, HAL_MAX_DELAY);
-      // Block2Far += encoderLeft.position;
+      // vertDist += encoderLeft.position;
       // osMutexRelease(EncoderLeftMutexHandle);
       return FIN;
     }
-    if(frontDist < 37){
-      SetSpeed(1, 1800);
-      SetSpeed(0, 1500);
+    if(frontDist < 32){
+      SetSpeed(1, 1200);
+      SetSpeed(0, 1000);
     }
-    if(frontDist < 34){
+    if(frontDist < 29){
       SetSpeed(1, 600);
       SetSpeed(0, 500);
     }
@@ -1356,32 +1513,32 @@ CMD_STATE_T B1Left(){
   switch (B1LEFT_STATE)
   {
   case B1LEFT_LEFT:
-    if(Move_Turn(true, HALF_LEFT, 1.05f) == FIN) B1LEFT_STATE = B1LEFT_RIGHT;
+    if(Move_Turn(true, HALF_LEFT, 0.44f) == FIN) B1LEFT_STATE = B1LEFT_RIGHT;
     break;
   case B1LEFT_RIGHT:
-    if(Move_Turn(true, RIGHT, 0.9f) == FIN) B1LEFT_STATE = B1LEFT_STRAIGHTEN;
+    if(Move_Turn(true, RIGHT, 0.92f) == FIN) B1LEFT_STATE = B1LEFT_STRAIGHTEN;
     break;
   case B1LEFT_STRAIGHTEN:
     // if(Move_Turn(true, HALF_LEFT, 0.93f) == FIN) {
-    if(Move_Turn(true, LEFT, 0.48f) == FIN) {
+    if(Move_Turn(true, LEFT, 0.45f) == FIN) {
       B1LEFT_STATE = B1LEFT_ADJUST;
       SetFacing(STRAIGHT);
       EncoderReset(0, POSITION);
-      osDelay(100);
+      osDelay(150);
     }
     break;
   case B1LEFT_ADJUST:
     osMutexWait(UltrasonicMutexHandle, HAL_MAX_DELAY);
     frontDist = UltraRead.frontDist;
     osMutexRelease(UltrasonicMutexHandle);
-    if(frontDist <= 26) {
+    if(frontDist <= 25) {
       SetDir(1,0);
       SetDir(0,0);
       SetFacing(STRAIGHT);
       SetSpeed(1,1200);
       SetSpeed(0,1000);
     }
-    if(frontDist >= 30) {
+    if(frontDist >= 28) {
       measure = true;
       SetDir(1,1);
       SetDir(0,1);
@@ -1389,15 +1546,15 @@ CMD_STATE_T B1Left(){
       SetSpeed(1,2400);
       SetSpeed(0,2000);
     }
-    if(frontDist < 30 && frontDist > 26){
+    if(frontDist < 28 && frontDist > 25){
       SetSpeed(1,0);
       SetSpeed(0,0);
       osMutexWait(EncoderLeftMutexHandle, HAL_MAX_DELAY);
-      toAdjust = (uint32_t) ((float) (encoderLeft.position) * 5 / 260);
+      toAdjust = (uint32_t) ((float) (encoderLeft.position) / 40);
       osMutexRelease(EncoderLeftMutexHandle);
-      Block2Far += 70;
-      if(measure) Block2Far += toAdjust;
-      else Block2Far -= toAdjust;
+      vertDist += 65;
+      if(measure) vertDist += toAdjust;
+      else vertDist -= toAdjust;
       B1LEFT_STATE = B1LEFT_LEFT;
       measure = false;
       return FIN;
@@ -1424,16 +1581,18 @@ CMD_STATE_T B1Right(){
   switch (B1RIGHT_STATE)
   {
   case B1RIGHT_LEFT:
-    if(Move_Turn(true, HALF_RIGHT, 0.71f) == FIN) B1RIGHT_STATE = B1RIGHT_RIGHT;
+    if(Move_Turn(true, HALF_RIGHT, 0.45f) == FIN) B1RIGHT_STATE = B1RIGHT_RIGHT;
     break;
   case B1RIGHT_RIGHT:
-    if(Move_Turn(true, LEFT, 1.03f) == FIN) B1RIGHT_STATE = B1RIGHT_STRAIGHTEN;
+    if(Move_Turn(true, LEFT, 0.92f) == FIN) B1RIGHT_STATE = B1RIGHT_STRAIGHTEN;
     break;
   case B1RIGHT_STRAIGHTEN:
     // if(Move_Turn(true, HALF_LEFT, 0.93f) == FIN) {
-    if(Move_Turn(true, RIGHT, 0.54f) == FIN) {
+    if(Move_Turn(true, RIGHT, 0.42f) == FIN) {
     	B1RIGHT_STATE = B1RIGHT_ADJUST;
-      osDelay(100);
+      EncoderReset(0, POSITION);
+      SetFacing(STRAIGHT);
+      osDelay(150);
     }
     break;
   case B1RIGHT_ADJUST:
@@ -1441,26 +1600,34 @@ CMD_STATE_T B1Right(){
     frontDist = UltraRead.frontDist;
     osMutexRelease(UltrasonicMutexHandle);
     
-    if(frontDist <= 25) {
-      SetDir(1,0);
-      SetDir(0,0);
-      SetFacing(STRAIGHT);
-      SetSpeed(1,2400);
-      SetSpeed(0,2000);
-    }
-    if(frontDist >= 27) {
-      SetDir(1,1);
-      SetDir(0,1);
-      SetFacing(STRAIGHT);
-      SetSpeed(1,2400);
-      SetSpeed(0,2000);
-    }
-    if(frontDist < 27 && frontDist > 25){
-      SetSpeed(1,0);
+    if(frontDist <= 26) {
+          SetDir(1,0);
+          SetDir(0,0);
+          SetFacing(STRAIGHT);
+          SetSpeed(1,1200);
+          SetSpeed(0,1000);
+        }
+        if(frontDist >= 30) {
+          measure = true;
+          SetDir(1,1);
+          SetDir(0,1);
+          SetFacing(STRAIGHT);
+          SetSpeed(1,2400);
+          SetSpeed(0,2000);
+        }
+        if(frontDist < 30 && frontDist > 26){
+          SetSpeed(1,0);
       SetSpeed(0,0);
-      B1RIGHT_STATE = B1RIGHT_LEFT;
+      osMutexWait(EncoderLeftMutexHandle, HAL_MAX_DELAY);
+      toAdjust = (uint32_t) ((float) (encoderLeft.position) / 40);
+      osMutexRelease(EncoderLeftMutexHandle);
+      vertDist += 65;
+      if(measure) vertDist += toAdjust;
+      else vertDist -= toAdjust;
+      B1LEFT_STATE = B1LEFT_LEFT;
+      measure = false;
       return FIN;
-    }
+        }
     break;
   default:
     return ERR;
@@ -1489,8 +1656,6 @@ typedef enum _B2RIGHT_STATE_t{
 } B2RIGHT_STATE_t;
 
 B2RIGHT_STATE_t B2RIGHT_STATE = B2RIGHT_RIGHT;
-uint32_t Block2Dist = 0;
-
 
 CMD_STATE_T B2Right(){
   uint32_t leftDist;
@@ -1505,16 +1670,16 @@ CMD_STATE_T B2Right(){
       SetDir(0,0);
       SetDir(1,0);
       SetFacing(STRAIGHT);
-      osDelay(100);
+      osDelay(150);
       SetSpeed(1,1800);
       SetSpeed(0,1500);
     }
     break;
   case B2RIGHT_FIND_BLOCK_RIGHT:
     osMutexWait(IRMutexHandle, HAL_MAX_DELAY);
-    leftDist = IRRead.left;
+    leftDist = (uint32_t)IRRead.left;
     osMutexRelease(IRMutexHandle);
-    if(leftDist < 200) {
+    if(leftDist < 170) {
       B2RIGHT_STATE = B2RIGHT_FIND_GAP_RIGHT;
       SetDir(0,1);
       SetDir(1,1);
@@ -1525,11 +1690,11 @@ CMD_STATE_T B2Right(){
     break;
   case B2RIGHT_FIND_GAP_RIGHT:
     osMutexWait(IRMutexHandle, HAL_MAX_DELAY);
-    leftDist = IRRead.left;
+    leftDist = (uint32_t)IRRead.left;
     osMutexRelease(IRMutexHandle);
     if(leftDist > 250) {
       B2RIGHT_STATE = B2RIGHT_TURN_FACE_BACK;
-      osDelay(150);
+      osDelay(250);
       SetSpeed(1,0);
       SetSpeed(0,0);
     }
@@ -1542,13 +1707,13 @@ CMD_STATE_T B2Right(){
     SetDir(0,0);
     SetDir(1,0);
     SetFacing(STRAIGHT);
-    osDelay(100);
+    osDelay(150);
     SetSpeed(1,2400);
     SetSpeed(0,2000);
    }
    break;
   case B2RIGHT_BACK_FACE_BACK:
-    dist = (uint32_t)( 7 * 260 / 4.8);
+    dist = (uint32_t)( 7 * 40);
     osMutexWait(EncoderLeftMutexHandle, HAL_MAX_DELAY);
     fwDist = encoderLeft.position;
     osMutexRelease(EncoderLeftMutexHandle);
@@ -1566,27 +1731,28 @@ CMD_STATE_T B2Right(){
     SetDir(0,0);
     SetDir(1,0);
     SetFacing(STRAIGHT);
-    osDelay(100);
-    SetSpeed(1,1800);
-    SetSpeed(0,1500);
+    osDelay(150);
+    SetSpeed(1,1200);
+    SetSpeed(0,1000);
    }
    break;
   case B2RIGHT_RESET_TO_BACK:
     osMutexWait(IRMutexHandle, HAL_MAX_DELAY);
-    leftDist = IRRead.left;
+    leftDist = (uint32_t)IRRead.left;
     osMutexRelease(IRMutexHandle);
-    if(leftDist > 300) {
+    if(leftDist > 200) {
    	  B2RIGHT_STATE = B2RIGHT_FIND_BLOCK;
       SetDir(0,1);
       SetDir(1,1);
       SetFacing(STRAIGHT);
       SetSpeed(1,1800);
       SetSpeed(0,1500);
+      EncoderReset(false, POSITION);
     }
    break;
   case B2RIGHT_FIND_BLOCK:
     osMutexWait(IRMutexHandle, HAL_MAX_DELAY);
-    leftDist = IRRead.left;
+    leftDist = (uint32_t)IRRead.left;
     osMutexRelease(IRMutexHandle);
     if(leftDist < 200) {
       B2RIGHT_STATE = B2RIGHT_FIND_GAP_LEFT;
@@ -1599,27 +1765,31 @@ CMD_STATE_T B2Right(){
    break;
  case B2RIGHT_FIND_GAP_LEFT:
     osMutexWait(IRMutexHandle, HAL_MAX_DELAY);
-    leftDist = IRRead.left;
+    leftDist =(uint32_t) IRRead.left;
     osMutexRelease(IRMutexHandle);
-    if(leftDist > 300) {
+    if(leftDist > 260) {
       B2RIGHT_STATE = B2RIGHT_TURN_TO_FRONT;
       SetSpeed(1,0);
       SetSpeed(0,0);
+      osMutexWait(EncoderLeftMutexHandle, HAL_MAX_DELAY);
+      horiDist = (encoderLeft.position / 2);
+      osMutexRelease(EncoderLeftMutexHandle);
     }
    break;
   case B2RIGHT_TURN_TO_FRONT:
-    if(Move_Turn(true, LEFT, 1.0f) == FIN) {
+    if(Move_Turn(true, LEFT, 1) == FIN) {
    	B2RIGHT_STATE = B2RIGHT_GO_BACK_STRAIGHT;
     EncoderReset(0, POSITION);
     SetDir(0,1);
     SetDir(1,1);
     SetFacing(STRAIGHT);
+    osDelay(150);
     SetSpeed(1,1800);
     SetSpeed(0,1500);
    }
    break;
   case B2RIGHT_GO_BACK_STRAIGHT:
-    dist = (uint32_t)((float)(Block2Far)* 260 / 4.8);
+    dist = (uint32_t)((float)(vertDist)* 40);
     osMutexWait(EncoderLeftMutexHandle, HAL_MAX_DELAY);
     fwDist = encoderLeft.position;
     osMutexRelease(EncoderLeftMutexHandle);
@@ -1627,17 +1797,16 @@ CMD_STATE_T B2Right(){
       SetSpeed(0,0);
       SetSpeed(1,0);
       B2RIGHT_STATE = B2RIGHT_FIRST_TURN_BACK_CENTER;
-      osDelay(10000);
     }
    break;
   case B2RIGHT_FIRST_TURN_BACK_CENTER:
     if(Move_Turn(1, LEFT, 1.0f) == FIN){
-      osDelay(10000);
       SetSpeed(0,0);
       SetSpeed(1,0);
       B2RIGHT_STATE = B2RIGHT_GOTO_BLOCK_BACK_CENTER;
       SetDir(0,1);
       SetDir(1,1);
+      EncoderReset(false, POSITION);
       SetFacing(STRAIGHT);
       SetSpeed(1,1800);
       SetSpeed(0,1500);
@@ -1645,9 +1814,13 @@ CMD_STATE_T B2Right(){
   break;
   case B2RIGHT_GOTO_BLOCK_BACK_CENTER:
     osMutexWait(IRMutexHandle, HAL_MAX_DELAY);
-    leftDist = IRRead.left;
+    leftDist = (uint32_t) IRRead.left;
     osMutexRelease(IRMutexHandle);
-    if(leftDist < 300) {
+
+    osMutexWait(EncoderLeftMutexHandle, HAL_MAX_DELAY);
+    fwDist = encoderLeft.position;
+    osMutexRelease(EncoderLeftMutexHandle);
+    if(fwDist > horiDist){
       B2RIGHT_STATE = B2RIGHT_BACKWARDS_AFTER_GOTO;
       SetSpeed(0,0);
       SetSpeed(1,0);
@@ -1660,7 +1833,7 @@ CMD_STATE_T B2Right(){
     }
   break;
   case B2RIGHT_BACKWARDS_AFTER_GOTO:
-    dist = (uint32_t)((float)(10)* 260 / 4.8);
+    dist = (uint32_t)((float)(17)* 40);
     osMutexWait(EncoderLeftMutexHandle, HAL_MAX_DELAY);
     fwDist = encoderLeft.position;
     osMutexRelease(EncoderLeftMutexHandle);
@@ -1690,6 +1863,245 @@ CMD_STATE_T B2Right(){
       SetSpeed(1,0);
       SetSpeed(0,0);
       B2RIGHT_STATE = B2RIGHT_RIGHT;
+      vertDist = 0;
+      horiDist = 0;
+      return FIN;
+    }
+    break;
+  default:
+    return ERR;
+    break;
+  }
+ return PROG;
+}
+
+typedef enum _B2LEFT_STATE_t{
+ B2LEFT_LEFT,
+ B2LEFT_FIND_BLOCK_LEFT,
+ B2LEFT_FIND_GAP_LEFT,
+ B2LEFT_TURN_FACE_BACK,
+ B2LEFT_BACK_FACE_BACK,
+ B2LEFT_TURN_FACE_RIGHT,
+ B2LEFT_RESET_TO_BACK,
+ B2LEFT_FIND_BLOCK,
+ B2LEFT_FIND_GAP_RIGHT,
+ B2LEFT_TURN_TO_FRONT,
+ B2LEFT_GO_BACK_STRAIGHT,
+ B2LEFT_FIRST_TURN_BACK_CENTER,
+ B2LEFT_GOTO_BLOCK_BACK_CENTER,
+ B2LEFT_BACKWARDS_AFTER_GOTO,
+ B2LEFT_SECOND_TURN_BACK_CENTER,
+ B2LEFT_HUIJIALO
+} B2LEFT_STATE_t;
+
+B2LEFT_STATE_t B2LEFT_STATE = B2LEFT_LEFT;
+
+CMD_STATE_T B2Left(){
+  double leftDist;
+  uint32_t fwDist;
+  uint32_t dist;
+  uint32_t frontDist;
+  switch (B2LEFT_STATE)
+  {
+  case B2LEFT_LEFT:
+    if(Move_Turn(true, LEFT, 1) == FIN) {
+      B2LEFT_STATE = B2LEFT_FIND_BLOCK_LEFT;
+      SetDir(0,0);
+      SetDir(1,0);
+      SetFacing(STRAIGHT);
+      osDelay(150);
+      SetSpeed(1,1800);
+      SetSpeed(0,1500);
+    }
+    break;
+  case B2LEFT_FIND_BLOCK_LEFT:
+    osMutexWait(IRMutexHandle, HAL_MAX_DELAY);
+    leftDist = IRRead.right;
+    osMutexRelease(IRMutexHandle);
+    if(leftDist < 170) {
+      B2LEFT_STATE = B2LEFT_TURN_FACE_BACK;
+//      SetDir(0,1);
+//      SetDir(1,1);
+//      SetFacing(STRAIGHT);
+//      SetSpeed(1,1200);
+//      SetSpeed(0,1000);
+    }
+    break;
+  case B2LEFT_FIND_GAP_LEFT:
+    osMutexWait(IRMutexHandle, HAL_MAX_DELAY);
+    leftDist = IRRead.right;
+    osMutexRelease(IRMutexHandle);
+    if(leftDist > 200) {
+      B2LEFT_STATE = B2LEFT_TURN_FACE_BACK;
+      SetSpeed(1,0);
+      SetSpeed(0,0);
+    }
+    break;
+  case B2LEFT_TURN_FACE_BACK:
+   // if(Move_Turn(true, HALF_LEFT, 0.93f) == FIN) {
+   if(Move_Turn(true, RIGHT, 1) == FIN) {
+   	B2LEFT_STATE = B2LEFT_BACK_FACE_BACK;
+    EncoderReset(0, POSITION);
+    SetDir(0,0);
+    SetDir(1,0);
+    SetFacing(STRAIGHT);
+    osDelay(150);
+    SetSpeed(1,2400);
+    SetSpeed(0,2000);
+   }
+   break;
+  case B2LEFT_BACK_FACE_BACK:
+	  osMutexWait(IRMutexHandle, HAL_MAX_DELAY);
+	  leftDist = IRRead.right;
+	  osMutexRelease(IRMutexHandle);
+	  if(leftDist < 170) {
+      B2LEFT_STATE = B2LEFT_TURN_FACE_RIGHT;
+      SetSpeed(1,0);
+      SetSpeed(0,0);
+    }
+    break;
+  case B2LEFT_TURN_FACE_RIGHT:
+   // if(Move_Turn(true, HALF_LEFT, 0.93f) == FIN) {
+   if(Move_Turn(true, RIGHT, 1) == FIN) {
+   	B2LEFT_STATE = B2LEFT_RESET_TO_BACK;
+    EncoderReset(0, POSITION);
+    SetDir(0,0);
+    SetDir(1,0);
+    SetFacing(STRAIGHT);
+    osDelay(150);
+    SetSpeed(1,1200);
+    SetSpeed(0,1000);
+   }
+   break;
+  case B2LEFT_RESET_TO_BACK:
+    osMutexWait(IRMutexHandle, HAL_MAX_DELAY);
+    leftDist = IRRead.right;
+    osMutexRelease(IRMutexHandle);
+    if(leftDist > 200) {
+   	  B2LEFT_STATE = B2LEFT_FIND_BLOCK;
+      SetDir(0,1);
+      SetDir(1,1);
+      SetFacing(STRAIGHT);
+      SetSpeed(1,2400);
+      SetSpeed(0,2000);
+      EncoderReset(false, POSITION);
+    }
+   break;
+  case B2LEFT_FIND_BLOCK:
+    osMutexWait(IRMutexHandle, HAL_MAX_DELAY);
+    leftDist = IRRead.right;
+    osMutexRelease(IRMutexHandle);
+    if(leftDist < 200) {
+      B2LEFT_STATE = B2LEFT_FIND_GAP_RIGHT;
+      SetDir(0,1);
+      SetDir(1,1);
+      SetFacing(STRAIGHT);
+      SetSpeed(1,1200);
+      SetSpeed(0,1000);
+    }
+   break;
+ case B2LEFT_FIND_GAP_RIGHT:
+    osMutexWait(IRMutexHandle, HAL_MAX_DELAY);
+    leftDist = IRRead.right;
+    osMutexRelease(IRMutexHandle);
+    if(leftDist > 200) {
+      B2LEFT_STATE = B2LEFT_TURN_TO_FRONT;
+      SetSpeed(1,0);
+      SetSpeed(0,0);
+      osMutexWait(EncoderLeftMutexHandle, HAL_MAX_DELAY);
+      horiDist = (encoderLeft.position / 2);
+      osMutexRelease(EncoderLeftMutexHandle);
+    }
+   break;
+  case B2LEFT_TURN_TO_FRONT:
+    if(Move_Turn(true, RIGHT, 0.99f) == FIN) {
+   	B2LEFT_STATE = B2LEFT_GO_BACK_STRAIGHT;
+    EncoderReset(0, POSITION);
+    SetDir(0,1);
+    SetDir(1,1);
+    SetFacing(STRAIGHT);
+    osDelay(150);
+    SetSpeed(1,1800);
+    SetSpeed(0,1500);
+   }
+   break;
+  case B2LEFT_GO_BACK_STRAIGHT:
+    dist = (uint32_t)((float)(vertDist)* 40);
+    osMutexWait(EncoderLeftMutexHandle, HAL_MAX_DELAY);
+    fwDist = encoderLeft.position;
+    osMutexRelease(EncoderLeftMutexHandle);
+    if(fwDist > dist){
+      SetSpeed(0,0);
+      SetSpeed(1,0);
+      B2LEFT_STATE = B2LEFT_FIRST_TURN_BACK_CENTER;
+    }
+   break;
+  case B2LEFT_FIRST_TURN_BACK_CENTER:
+    if(Move_Turn(1, RIGHT, 1.0f) == FIN){
+      SetSpeed(0,0);
+      SetSpeed(1,0);
+      EncoderReset(false, POSITION);
+      B2LEFT_STATE = B2LEFT_GOTO_BLOCK_BACK_CENTER;
+      SetDir(0,1);
+      SetDir(1,1);
+      SetFacing(STRAIGHT);
+      SetSpeed(1,1800);
+      SetSpeed(0,1500);
+    }
+  break;
+  case B2LEFT_GOTO_BLOCK_BACK_CENTER:
+    osMutexWait(IRMutexHandle, HAL_MAX_DELAY);
+    leftDist = (uint32_t) IRRead.right;
+    osMutexRelease(IRMutexHandle);
+
+    osMutexWait(EncoderLeftMutexHandle, HAL_MAX_DELAY);
+    fwDist = encoderLeft.position;
+    osMutexRelease(EncoderLeftMutexHandle);
+    if(fwDist > horiDist){
+      B2LEFT_STATE = B2LEFT_BACKWARDS_AFTER_GOTO;
+      SetSpeed(0,0);
+      SetSpeed(1,0);
+      SetDir(0,0);
+      SetDir(1,0);
+      SetFacing(STRAIGHT);
+      SetSpeed(1,1800);
+      SetSpeed(0,1500);
+      EncoderReset(0, POSITION);
+    }
+  break;
+  case B2LEFT_BACKWARDS_AFTER_GOTO:
+    dist = (uint32_t)((float)(23)* 40);
+    osMutexWait(EncoderLeftMutexHandle, HAL_MAX_DELAY);
+    fwDist = encoderLeft.position;
+    osMutexRelease(EncoderLeftMutexHandle);
+    if(fwDist > dist){
+      SetSpeed(0,0);
+      SetSpeed(1,0);
+      B2LEFT_STATE = B2LEFT_SECOND_TURN_BACK_CENTER;
+    }
+  break;
+  case B2LEFT_SECOND_TURN_BACK_CENTER:
+    if(Move_Turn(1, LEFT, 1.0f) == FIN){
+      SetSpeed(0,0);
+      SetSpeed(1,0);
+      SetDir(0,1);
+      SetDir(1,1);
+      SetFacing(STRAIGHT);
+      SetSpeed(1,1800);
+      SetSpeed(0,1500);
+      B2LEFT_STATE = B2LEFT_HUIJIALO;
+    }
+  break;
+  case B2LEFT_HUIJIALO:
+    osMutexWait(UltrasonicMutexHandle, HAL_MAX_DELAY);
+    frontDist = UltraRead.frontDist;
+    osMutexRelease(UltrasonicMutexHandle);
+    if (frontDist < 10) {
+      SetSpeed(1,0);
+      SetSpeed(0,0);
+      B2LEFT_STATE = B2LEFT_LEFT;
+      vertDist = 0;
+      horiDist = 0;
       return FIN;
     }
     break;
@@ -1720,6 +2132,7 @@ CMD_STATE_T Task_Two(STATE task){
 	    return PROG;
 	    break;
 	  case B2LEFT:
+      if(B2Left() == FIN ) return FIN;
 	    return PROG;
 	    break;
 	  case B2RIGHT:
@@ -1745,13 +2158,13 @@ MOVE_STATE Move_Straight(bool forward, uint8_t degree){
       SetFacing(STRAIGHT);
       osDelay(200);
       SetSpeed(0,1000);
-	    SetSpeed(1,1200);
+	    SetSpeed(1,1400);
       EncoderReset(false, POSITION);
       move_straight_state = PROGRESS;
       return INIT;
       break;
     case PROGRESS:
-      dist = (uint32_t)((float)(degree)* 260 / 4.8);
+      dist = (uint32_t)((float)(degree)* 30.0f);
     	osMutexWait(EncoderLeftMutexHandle, osWaitForever);
     	currdist = encoderLeft.position;
     	osMutexRelease(EncoderLeftMutexHandle);
@@ -1787,50 +2200,55 @@ CMD_STATE_T Move_Turn(bool forward, DIRECTION direction, float degree){
       SetSpeed(0,1300);
 	    SetSpeed(1,1300);
       EncoderReset(false, POSITION);
+      HeadingReset();
       move_turn_state = PROGRESS;
       break;
     case PROGRESS:
-      dist = degree;
-      osMutexWait(EncoderLeftMutexHandle, osWaitForever);
-      currdist = encoderLeft.position;
-      osMutexRelease(EncoderLeftMutexHandle);
-    	if (direction == RIGHT){
-        if ((float)currdist >  RIGHT_TURN * dist ){
-		      move_turn_state = DONE;
-		      SetSpeed(0,0);
-		          	SetSpeed(1,0);
-	      }
+      osMutexWait(IMUReadMutexHandle, osWaitForever);
+      dist = CurrentHeading;
+      osMutexRelease(IMUReadMutexHandle);
+      if(dist > degree * 90){
+        move_turn_state = DONE;
+        SetSpeed(0,0);
+		SetSpeed(1,0);
       }
-      else if (direction == LEFT){
-        if(forward){
-        if ((float)currdist >  LEFT_TURN * dist ){
-		      move_turn_state = DONE;
-		      SetSpeed(0,0);
-		      SetSpeed(1,0);
-	      }
-        }
-        else{
-        if ((float)currdist >  (LEFT_TURN + 5) * dist ){
-		      move_turn_state = DONE;
-		      SetSpeed(0,0);
-		      SetSpeed(1,0);
-	      }
-        }
-      }
-      if (direction == HALF_LEFT){
-        if ((float)currdist >  LEFT_TURN * dist ){
-		      move_turn_state = DONE;
-		      SetSpeed(0,0);
-		          	SetSpeed(1,0);
-	      }
-      }
-      if (direction == HALF_RIGHT){
-        if ((float)currdist >  RIGHT_TURN * dist ){
-		      move_turn_state = DONE;
-		      SetSpeed(0,0);
-		          	SetSpeed(1,0);
-	      }
-      }
+    	// if (direction == RIGHT){
+      //   if ((float)currdist >  RIGHT_TURN * dist ){
+		  //     move_turn_state = DONE;
+		  //     SetSpeed(0,0);
+		  //         	SetSpeed(1,0);
+	    //   }
+      // }
+      // else if (direction == LEFT){
+      //   if(forward){
+      //   if ((float)currdist >  LEFT_TURN * dist ){
+		  //     move_turn_state = DONE;
+		  //     SetSpeed(0,0);
+		  //     SetSpeed(1,0);
+	    //   }
+      //   }
+      //   else{
+      //   if ((float)currdist >  (LEFT_TURN + 5) * dist ){
+		  //     move_turn_state = DONE;
+		  //     SetSpeed(0,0);
+		  //     SetSpeed(1,0);
+	    //   }
+      //   }
+      // }
+      // if (direction == HALF_LEFT){
+      //   if ((float)currdist >  LEFT_TURN * dist ){
+		  //     move_turn_state = DONE;
+		  //     SetSpeed(0,0);
+		  //         	SetSpeed(1,0);
+	    //   }
+      // }
+      // if (direction == HALF_RIGHT){
+      //   if ((float)currdist >  RIGHT_TURN * dist ){
+		  //     move_turn_state = DONE;
+		  //     SetSpeed(0,0);
+		  //         	SetSpeed(1,0);
+	    //   }
+      // }
       break;
     case DONE:
       move_turn_state = INIT;
@@ -1867,6 +2285,9 @@ STATE UpdateState(uint8_t command, uint8_t degree) {
           break;
         case 0x05:
           return B2RIGHT;
+          break;
+        case 0x06:
+          return CALI;
           break;
         default:
           break;
@@ -2092,7 +2513,7 @@ void MotorTask(void const * argument)
 //  SetSpeed(0, 2000);
 	uint16_t targetLeftPWM = 2000;
     uint16_t targetRightPWM = 2400;
-    uint16_t rampStep = 50;
+    uint16_t rampStep = 200;
     uint32_t maxDelay = 100;
   for(;;)
   {
@@ -2208,43 +2629,26 @@ void MotorTask(void const * argument)
         CurrentState = WAIT;
       }
       break;
+    case B2LEFT:
+      if(Task_Two(B2LEFT) == FIN){
+        HAL_UART_Transmit(&huart3, (uint8_t *)&ack, 1, HAL_MAX_DELAY);
+        CurrentState = WAIT;
+      }
+      break;
+    case CALI:
+    	icm20948_gyro_calibration_runtime();
+      SetFacing(LEFT);
+      osDelay(100);
+      SetFacing(RIGHT);
+      osDelay(100);
+      HAL_UART_Transmit(&huart3, (uint8_t *)&ack, 1, HAL_MAX_DELAY);
+      CurrentState = WAIT;
+      break;
     default:
       break;
     }
-//	  osMutexWait(EncoderLeftMutexHandle, osWaitForever);
-//	  currdist = encoderLeft.position;
-//	  osMutexRelease(EncoderLeftMutexHandle);
-//	  uint32_t dist = (115 - 80) / 3.5 * 200 + 4150;
-//	  if (currdist >  dist ){
-//		  SetSpeed(0,0);
-//		  SetSpeed(1,0);
-//	  }
 
-	  //left
-//	  osMutexWait(EncoderLeftMutexHandle, osWaitForever);
-//	  currdist = encoderLeft.position;
-//	  osMutexRelease(EncoderLeftMutexHandle);
-//	  if (currdist >  300 ){
-//		  SetSpeed(0,0);
-//		  SetSpeed(1,0);
-//	  }
-
-	  //left
-//	   osMutexWait(EncoderLeftMutexHandle, osWaitForever);
-//	   currdist = encoderLeft.position;
-//	   osMutexRelease(EncoderLeftMutexHandle);
-//	   if (currdist >  1800 ){
-//		   SetSpeed(0,0);
-//		   SetSpeed(1,0);
-//		   SetFacing(STRAIGHT);
-//	   }
-//	   if (currdist >  4250 ){
-//		   SetSpeed(0,0);
-//		   SetSpeed(1,0);
-//		   SetFacing(STRAIGHT);
-//	   }
-
-    osDelay(5);
+    osDelay(50);
   }
   /* USER CODE END MotorTask */
 }
@@ -2260,83 +2664,37 @@ void ICMUpdate(void const * argument)
 {
   /* USER CODE BEGIN ICMUpdate */
   /* Infinite loop */
-	ICM20948 imu;
-	bool init = false;
-	uint8_t* status;
+  axises gyro_data;
+  axises mag_data;
+  uint32_t current_time;
+  double delta_time = 0.0f;
+  double yaw_rate_filtered = 0.0f;
+  double buf = 0.0f;
+  const float alpha = 0.7f;
 
+  HAL_TIM_Base_Start(&htim6);  
+  __HAL_TIM_SET_COUNTER(&htim6, 0);
 
-	int i;
-	float ax,ay, az, gx,gy,gz;
-	float pitch, roll, pitch_gyro = 0, roll_gyro = 0, pitch_CF = 0, roll_CF = 0;
-
-	uint32_t millisOld = HAL_GetTick();
-	uint32_t millisNow, dt;
   for(;;)
   {
-	  if(!init){
-		  status = IMU_Initialise( &imu, &hi2c1, &huart3);
-		  if (status == 0)init = true;
-	  }
+	  ak09916_mag_read(&mag_data);
+//    if (osSemaphoreWait(calibSemaphoreHandle, osWaitForever) == osOK){
+      icm20948_gyro_read_dps(&gyro_data);
+      float yaw_rate_raw = gyro_data.z;
+      
+      yaw_rate_filtered = alpha * yaw_rate_raw + (1.0f - alpha) * yaw_rate_filtered;
 
-	  uint8_t sbuf[10][10] = {0};
+      current_time = __HAL_TIM_GET_COUNTER(&htim6);
+      delta_time = get_time_difference(current_time, 0);
+      __HAL_TIM_SET_COUNTER(&htim6, 0);
+      buf = fabs(yaw_rate_filtered) * delta_time;
 
-	  	  IMU_AccelRead(&imu);
-	  	  IMU_GyroRead(&imu);
-
-	  	  millisNow = HAL_GetTick();
-	  	  dt = millisNow - millisOld;
-	  	  millisOld = millisNow;
-
-	  	  ax = imu.acc[0];
-	  	  ay = imu.acc[1];
-	  	  az = imu.acc[2];
-	  	  roll = atan(ay/az) / M_PI * 180;
-	  	  pitch = atan(ax/az) / M_PI * 180;
-	  	  pitch = -pitch;
-
-	  	  gx = imu.gyro[0];
-	  	  gy = imu.gyro[1];
-	  	  gz = imu.gyro[2];
-
-	  	  roll_gyro = roll_gyro + (imu.gyro[0]*dt*0.001);
-	  	  pitch_gyro = pitch_gyro + (imu.gyro[1]*dt*0.001);
-
-	  	  roll_CF = 0.05*roll +0.95*(roll_CF + imu.gyro[0]*dt*0.001);
-	  	  pitch_CF = 0.05*pitch + 0.95*(pitch_CF + imu.gyro[1]*dt*0.001);
-
-	  	  osMutexWait(IMUReadMutexHandle, osWaitForever);
-	  	  imuRead.pitch_CF = pitch_CF;
-	  	  imuRead.roll_CF = roll_CF;
-	  	  osMutexRelease(IMUReadMutexHandle);
-
-	  	snprintf(sbuf[0], sizeof(sbuf[0]), "%5.2f , ", roll);
-	  	snprintf(sbuf[1], sizeof(sbuf[1]), "%5.2f , ", pitch);
-
-
-	  	snprintf(sbuf[2], sizeof(sbuf[2]), "%7.2f , ", roll_gyro);
-	  	snprintf(sbuf[3], sizeof(sbuf[3]), "%7.2f , ", pitch_gyro);
-
-	  	snprintf(sbuf[4], sizeof(sbuf[4]), "%7.2f , ", roll_CF);
-	  	snprintf(sbuf[5], sizeof(sbuf[5]), "%7.2f , ", pitch_CF);
-        // OLED_ShowString(10,20, (uint8_t *)&(sbuf[4]));
-
-//	  	  HAL_UART_Transmit(&huart3, sbuf[0], 8, HAL_MAX_DELAY);
-//	  	  HAL_UART_Transmit(&huart3, sbuf[1], 8, HAL_MAX_DELAY);
-//	  	  HAL_UART_Transmit(&huart3, sbuf[2], 10, HAL_MAX_DELAY);
-//	  	  HAL_UART_Transmit(&huart3, sbuf[3], 10, HAL_MAX_DELAY);
-//	  	  HAL_UART_Transmit(&huart3, sbuf[4], 10, HAL_MAX_DELAY);
-//	  	  HAL_UART_Transmit(&huart3, sbuf[5], 10, HAL_MAX_DELAY);
-//
-//	  	  HAL_UART_Transmit(&huart3, "\r\n", 10, HAL_MAX_DELAY);
-	  	char txBuffer[64];  // Large enough to hold all formatted data
-	  	snprintf(txBuffer, sizeof(txBuffer),
-	  	         "%5.2f , %5.2f , %7.2f , %7.2f , %7.2f , %7.2f\r\n",
-	  	         roll, pitch, roll_gyro, pitch_gyro, roll_CF, pitch_CF);
-
-	  	// Transmit the entire buffer in one call
-//	  	HAL_UART_Transmit(&huart3, (uint8_t*)txBuffer, strlen(txBuffer), 100);
-
-    osDelay(10);
+      osMutexWait(IMUReadMutexHandle, HAL_MAX_DELAY);
+      CurrentHeading += buf * 1.05	;
+      osMutexRelease(IMUReadMutexHandle);
+//      osSemaphoreRelease(calibSemaphoreHandle);
+//    }
+    osDelay(1);
   }
   /* USER CODE END ICMUpdate */
 }
@@ -2352,11 +2710,10 @@ void IRTask(void const * argument)
 {
   /* USER CODE BEGIN IRTask */
   /* Infinite loop */
-  osDelay(500);
   uint16_t left, right;
   double bufLeft, bufRight;
   double movingAverageLeft = 0.0, movingAverageRight = 0.0;
-  double movingBufferLeft[10] = {0}, movingBufferRight[10] = {0};
+  double movingBufferLeft[20] = {0}, movingBufferRight[20] = {0};
   int indexLeft = 0, indexRight = 0;
   double sumLeft = 0.0, sumRight = 0.0;
   int countLeft = 0, countRight = 0;
@@ -2367,11 +2724,13 @@ void IRTask(void const * argument)
     // Check DMA flags and retrieve left and right sensor data
     if (__HAL_DMA_GET_FLAG(&hdma_adc1, DMA_FLAG_TCIF0_4))
     {
+        // Average the two buffer elements for the left sensor
         left = LEFT_IR_RES_BUFFER[0];
         __HAL_DMA_CLEAR_FLAG(&hdma_adc1, DMA_FLAG_TCIF0_4);
     }
     if (__HAL_DMA_GET_FLAG(&hdma_adc2, DMA_FLAG_TCIF2_6))
     {
+        // Average the two buffer elements for the right sensor
         right = RIGHT_IR_RES_BUFFER[0];
         __HAL_DMA_CLEAR_FLAG(&hdma_adc2, DMA_FLAG_TCIF2_6);
     }
@@ -2390,10 +2749,10 @@ void IRTask(void const * argument)
     sumLeft += bufLeft;  // Add the new value to the sum
 
     // Update the index and wrap around if necessary
-    indexLeft = (indexLeft + 1) % 10;
+    indexLeft = (indexLeft + 1) % 20;
 
     // Calculate the average for left
-    countLeft = (countLeft < 10) ? countLeft + 1 : 10;
+    countLeft = (countLeft < 20) ? countLeft + 1 : 20;
     movingAverageLeft = sumLeft / countLeft;
 
     // Update moving average for right sensor
@@ -2402,15 +2761,15 @@ void IRTask(void const * argument)
     sumRight += bufRight;  // Add the new value to the sum
 
     // Update the index and wrap around if necessary
-    indexRight = (indexRight + 1) % 10;
+    indexRight = (indexRight + 1) % 20;
 
     // Calculate the average for right
-    countRight = (countRight < 10) ? countRight + 1 : 10;
+    countRight = (countRight < 20) ? countRight + 1 : 20;
     movingAverageRight = sumRight / countRight;
 
     // Process values using your polynomial computation (if needed)
-    double processedLeft = compute_polynomial(movingAverageLeft);
-    double processedRight = compute_polynomial(movingAverageRight);
+    double processedLeft = compute_polynomial(bufLeft);
+    double processedRight = compute_polynomial(bufRight);
 
     // Store the processed values in a shared structure
     osMutexWait(IRMutexHandle, osWaitForever);
@@ -2418,16 +2777,11 @@ void IRTask(void const * argument)
     IRRead.right = processedRight;
     osMutexRelease(IRMutexHandle);
 
-//     // Transmit the right sensor data via UART
-//     char txBuffer[64];  // Large enough to hold all formatted data
-//     snprintf(txBuffer, sizeof(txBuffer),
-//              "%8.2f\r\n",
-//              bufRight);
-// //    HAL_UART_Transmit(&huart3, (uint8_t*)txBuffer, strlen(txBuffer), 100);
-    osDelay(2);
+    osDelay(1);
   }
   /* USER CODE END IRTask */
 }
+
 
 /* USER CODE BEGIN Header_UltrasonicTask */
 /**
@@ -2443,8 +2797,8 @@ void UltrasonicTask(void const * argument)
   for(;;)
   {
 
-	HCSR04_Read();
-    osDelay(50);
+	  HCSR04_Read();
+    osDelay(25);
   }
   /* USER CODE END UltrasonicTask */
 }

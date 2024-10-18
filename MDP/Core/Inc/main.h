@@ -53,6 +53,7 @@ extern "C" {
 #define LEFT_TURN 		1700
 #define TARGET_LEFT   1000
 #define TARGET_RIGHT  1200
+extern I2C_HandleTypeDef hi2c1;
 
 /* USER CODE END EM */
 
@@ -100,6 +101,7 @@ void Error_Handler(void);
 #define PWMRIGHT_GPIO_Port GPIOC
 
 /* USER CODE BEGIN Private defines */
+#define ICM20948_I2C					(&hi2c1)
 
 /* USER CODE END Private defines */
 

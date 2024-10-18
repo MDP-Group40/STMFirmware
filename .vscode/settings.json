@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "icm20948.h": "c",
+        "stdbool.h": "c"
+    }
+}

@@ -5,12 +5,15 @@
 
 # Add inputs and outputs from these tool invocations to the build variables 
 C_SRCS += \
+../PeripheralDriver/Src/icm20948.c \
 ../PeripheralDriver/Src/oled.c 
 
 OBJS += \
+./PeripheralDriver/Src/icm20948.o \
 ./PeripheralDriver/Src/oled.o 
 
 C_DEPS += \
+./PeripheralDriver/Src/icm20948.d \
 ./PeripheralDriver/Src/oled.d 
 
 
@@ -21,7 +24,7 @@ PeripheralDriver/Src/%.o PeripheralDriver/Src/%.su PeripheralDriver/Src/%.cyclo:
 clean: clean-PeripheralDriver-2f-Src
 
 clean-PeripheralDriver-2f-Src:
-	-$(RM) ./PeripheralDriver/Src/oled.cyclo ./PeripheralDriver/Src/oled.d ./PeripheralDriver/Src/oled.o ./PeripheralDriver/Src/oled.su
+	-$(RM) ./PeripheralDriver/Src/icm20948.cyclo ./PeripheralDriver/Src/icm20948.d ./PeripheralDriver/Src/icm20948.o ./PeripheralDriver/Src/icm20948.su ./PeripheralDriver/Src/oled.cyclo ./PeripheralDriver/Src/oled.d ./PeripheralDriver/Src/oled.o ./PeripheralDriver/Src/oled.su
 
 .PHONY: clean-PeripheralDriver-2f-Src
 
